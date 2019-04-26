@@ -24,7 +24,7 @@ RUN echo "Configuring..." && \
 	echo '[mysqld]\nskip-host-cache\nskip-name-resolve' > /etc/mysql/conf.d/docker.cnf
 
 COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/entrypoint.sh && \
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
 	mkdir /docker-entrypoint-initdb.d && \
 	ln -s usr/local/bin/docker-entrypoint.sh /
 
