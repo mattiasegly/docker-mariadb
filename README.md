@@ -1,6 +1,9 @@
 # docker-rpi-mariadb
 Raspberry Pi Docker Container for MariaDB<BR>
-Work in progress. Limited use case. Personal implementation of MariaDB.
+Limited use case. Personal implementation of MariaDB.
+
+Multiarch build using balena's Raspberry Pi image and docker's official Debian image.<BR>
+Running with tag :latest should work on all Raspberry Pi models and standard 64-bit hardware.
 
 For testing and troubleshooting, run with:<BR>
 docker run -d --name someappdb \\\
