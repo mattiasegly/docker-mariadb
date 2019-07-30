@@ -1,4 +1,4 @@
-# docker-rpi-mariadb
+# rpi-mariadb
 Raspberry Pi Docker Container for MariaDB<BR>
 Limited use case. Personal implementation of MariaDB.
 
