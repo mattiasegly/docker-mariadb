@@ -44,10 +44,8 @@ _check_config() {
 	toRun=( "$@" --verbose --help --log-bin-index="$(mktemp -u)" )
 	if ! errors="$("${toRun[@]}" 2>&1 >/dev/null)"; then
 		cat >&2 <<-EOM
-
 			ERROR: mysqld failed while attempting to check config
 			command was: "${toRun[*]}"
-
 			$errors
 		EOM
 		exit 1
@@ -59,9 +57,7 @@ _check_config() {
 # latter only show values present in config files, and not server defaults
 _get_config() {
 	local conf="$1"; shift
-	"$@" --verbose --help --log-bin-index="$(mktemp -u)" 2>/dev/null \
-		| awk '$1 == "'"$conf"'" && /^[^ \t]/ { sub(/^[^ \t]+[ \t]+/, ""); print; exit }'
-	# match "datadir      /some/path with/spaces in/it here" but not "--xyz=abc\n     datadir (xyz)"
+	"$@" --verbose --help --log-bin-index="$(mktemp -u)" 2>/dev/null | awk '$1 == "'"$conf"'" { print $2; exit }'
 }
 
 # allow the container to be started with `--user`
@@ -69,7 +65,7 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" -a "$(id -u)" = '0' ]; then
 	_check_config "$@"
 	DATADIR="$(_get_config 'datadir' "$@")"
 	mkdir -p "$DATADIR"
-	find "$DATADIR" \! -user mysql -exec chown mysql '{}' +
+	chown -R mysql:mysql "$DATADIR"
 	exec gosu mysql "$BASH_SOURCE" "$@"
 fi
 
@@ -80,25 +76,23 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 	DATADIR="$(_get_config 'datadir' "$@")"
 
 	if [ ! -d "$DATADIR/mysql" ]; then
+		# for backward compability support both MYSQL_ and MARIADB_ env vars
 		file_env 'MYSQL_ROOT_PASSWORD'
-		if [ -z "$MYSQL_ROOT_PASSWORD" -a -z "$MYSQL_ALLOW_EMPTY_PASSWORD" -a -z "$MYSQL_RANDOM_ROOT_PASSWORD" ]; then
+	  file_env 'MARIADB_ROOT_PASSWORD'
+		MARIADB_ROOT_PASSWORD="${MARIADB_ROOT_PASSWORD:-$MYSQL_ROOT_PASSWORD}"
+		MARIADB_ALLOW_EMPTY_PASSWORD="${MARIADB_ALLOW_EMPTY_PASSWORD:-$MYSQL_ALLOW_EMPTY_PASSWORD}"
+		MARIADB_RANDOM_ROOT_PASSWORD="${MARIADB_RANDOM_ROOT_PASSWORD:-$MYSQL_RANDOM_ROOT_PASSWORD}"
+		if [ -z "$MARIADB_ROOT_PASSWORD" -a -z "$MARIADB_ALLOW_EMPTY_PASSWORD" -a -z "$MARIADB_RANDOM_ROOT_PASSWORD" ]; then
 			echo >&2 'error: database is uninitialized and password option is not specified '
-			echo >&2 '  You need to specify one of MYSQL_ROOT_PASSWORD, MYSQL_ALLOW_EMPTY_PASSWORD and MYSQL_RANDOM_ROOT_PASSWORD'
+			echo >&2 '  You need to specify one of MARIADB_ROOT_PASSWORD, MARIADB_ALLOW_EMPTY_PASSWORD and MARIADB_RANDOM_ROOT_PASSWORD'
 			exit 1
 		fi
 
 		mkdir -p "$DATADIR"
 
 		echo 'Initializing database'
-		installArgs=( --datadir="$DATADIR" --rpm )
-		if { mysql_install_db --help || :; } | grep -q -- '--auth-root-authentication-method'; then
-			# beginning in 10.4.3, install_db uses "socket" which only allows system user root to connect, switch back to "normal" to allow mysql root without a password
-			# see https://github.com/MariaDB/server/commit/b9f3f06857ac6f9105dc65caae19782f09b47fb3
-			# (this flag doesn't exist in 10.0 and below)
-			installArgs+=( --auth-root-authentication-method=normal )
-		fi
 		# "Other options are passed to mysqld." (so we pass all "mysqld" arguments directly here)
-		mysql_install_db "${installArgs[@]}" "${@:2}"
+		mysql_install_db --datadir="$DATADIR" --rpm "${@:2}"
 		echo 'Database initialized'
 
 		SOCKET="$(_get_config 'socket' "$@")"
@@ -119,25 +113,32 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 			exit 1
 		fi
 
-		if [ -z "$MYSQL_INITDB_SKIP_TZINFO" ]; then
+		if [ -z "${MARIADB_INITDB_SKIP_TZINFO:-$MYSQL_INITDB_SKIP_TZINFO}" ]; then
 			# sed is for https://bugs.mysql.com/bug.php?id=20545
 			mysql_tzinfo_to_sql /usr/share/zoneinfo | sed 's/Local time zone must be set--see zic manual page/FCTY/' | "${mysql[@]}" mysql
 		fi
 
-		if [ ! -z "$MYSQL_RANDOM_ROOT_PASSWORD" ]; then
-			export MYSQL_ROOT_PASSWORD="$(pwgen -1 32)"
-			echo "GENERATED ROOT PASSWORD: $MYSQL_ROOT_PASSWORD"
+		if [ ! -z "$MARIADB_RANDOM_ROOT_PASSWORD" ]; then
+            # we have to filter characters like ' and \ that will terminate the sql query or don't count
+            # as special characters to keep the enterprise server password policy in mind.
+            MARIADB_ROOT_PASSWORD="'"
+            while [[ $MARIADB_ROOT_PASSWORD == *"'"* ]] || [[ $MARIADB_ROOT_PASSWORD == *"\\"* ]]; do
+                export MARIADB_ROOT_PASSWORD="$(pwgen -1 32 -y)"
+            done
 		fi
+
 
 		rootCreate=
 		# default root to listen for connections from anywhere
-		file_env 'MYSQL_ROOT_HOST' '%'
-		if [ ! -z "$MYSQL_ROOT_HOST" -a "$MYSQL_ROOT_HOST" != 'localhost' ]; then
+		file_env 'MYSQL_ROOT_HOST'
+		file_env 'MARIADB_ROOT_HOST' '%'
+		MARIADB_ROOT_HOST="${MARIADB_ROOT_HOST:-$MYSQL_ROOT_HOST}"
+		if [ ! -z "$MARIADB_ROOT_HOST" -a "$MARIADB_ROOT_HOST" != 'localhost' ]; then
 			# no, we don't care if read finds a terminating character in this heredoc
 			# https://unix.stackexchange.com/questions/265149/why-is-set-o-errexit-breaking-this-read-heredoc-expression/265151#265151
 			read -r -d '' rootCreate <<-EOSQL || true
-				CREATE USER 'root'@'${MYSQL_ROOT_HOST}' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}' ;
-				GRANT ALL ON *.* TO 'root'@'${MYSQL_ROOT_HOST}' WITH GRANT OPTION ;
+				CREATE USER 'root'@'${MARIADB_ROOT_HOST}' IDENTIFIED BY '${MARIADB_ROOT_PASSWORD}' ;
+				GRANT ALL ON *.* TO 'root'@'${MARIADB_ROOT_HOST}' WITH GRANT OPTION ;
 			EOSQL
 		fi
 
@@ -145,32 +146,37 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 			-- What's done in this file shouldn't be replicated
 			--  or products like mysql-fabric won't work
 			SET @@SESSION.SQL_LOG_BIN=0;
-
 			DELETE FROM mysql.user WHERE user NOT IN ('mysql.sys', 'mysqlxsys', 'root') OR host NOT IN ('localhost') ;
-			SET PASSWORD FOR 'root'@'localhost'=PASSWORD('${MYSQL_ROOT_PASSWORD}') ;
+			SET PASSWORD FOR 'root'@'localhost'=PASSWORD('${MARIADB_ROOT_PASSWORD}') ;
 			GRANT ALL ON *.* TO 'root'@'localhost' WITH GRANT OPTION ;
 			${rootCreate}
 			DROP DATABASE IF EXISTS test ;
 			FLUSH PRIVILEGES ;
 		EOSQL
 
-		if [ ! -z "$MYSQL_ROOT_PASSWORD" ]; then
-			mysql+=( -p"${MYSQL_ROOT_PASSWORD}" )
+		if [ ! -z "$MARIADB_ROOT_PASSWORD" ]; then
+			mysql+=( -p"${MARIADB_ROOT_PASSWORD}" )
 		fi
 
 		file_env 'MYSQL_DATABASE'
-		if [ "$MYSQL_DATABASE" ]; then
-			echo "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DATABASE\` ;" | "${mysql[@]}"
-			mysql+=( "$MYSQL_DATABASE" )
+		file_env 'MARIADB_DATABASE'
+		MARIADB_DATABASE="${MARIADB_DATABASE:-$MYSQL_DATABASE}"
+		if [ "$MARIADB_DATABASE" ]; then
+			echo "CREATE DATABASE IF NOT EXISTS \`$MARIADB_DATABASE\` ;" | "${mysql[@]}"
+			mysql+=( "$MARIADB_DATABASE" )
 		fi
 
 		file_env 'MYSQL_USER'
+		file_env 'MARIADB_USER'
+		MARIADB_USER="${MARIADB_USER:-$MYSQL_USER}"
 		file_env 'MYSQL_PASSWORD'
-		if [ "$MYSQL_USER" -a "$MYSQL_PASSWORD" ]; then
-			echo "CREATE USER '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD' ;" | "${mysql[@]}"
+		file_env 'MARIADB_PASSWORD'
+		MARIADB_PASSWORD="${MARIADB_PASSWORD:-$MYSQL_PASSWORD}"
+		if [ "$MARIADB_USER" -a "$MARIADB_PASSWORD" ]; then
+			echo "CREATE USER '$MARIADB_USER'@'%' IDENTIFIED BY '$MARIADB_PASSWORD' ;" | "${mysql[@]}"
 
-			if [ "$MYSQL_DATABASE" ]; then
-				echo "GRANT ALL ON \`$MYSQL_DATABASE\`.* TO '$MYSQL_USER'@'%' ;" | "${mysql[@]}"
+			if [ "$MARIADB_DATABASE" ]; then
+				echo "GRANT ALL ON \`$MARIADB_DATABASE\`.* TO '$MARIADB_USER'@'%' ;" | "${mysql[@]}"
 			fi
 		fi
 
