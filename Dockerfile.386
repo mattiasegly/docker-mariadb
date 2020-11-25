@@ -1,5 +1,4 @@
-FROM mattiasegly/base-image:buster-arm
-RUN [ "cross-build-start" ]
+FROM mattiasegly/base-image:buster-386
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	pwgen \
@@ -27,8 +26,6 @@ COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
 	mkdir /docker-entrypoint-initdb.d && \
 	ln -s usr/local/bin/docker-entrypoint.sh /
-
-RUN [ "cross-build-end" ]
 
 VOLUME /var/lib/mysql
 EXPOSE 3306
