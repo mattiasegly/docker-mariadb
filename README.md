@@ -16,4 +16,4 @@ mattiasegly/rpi-mariadb:latest --transaction-isolation=READ-COMMITTED --log-bin=
   
 I know nothing about code, so assume that everything here sets the world on fire. Use at your own peril.
 
-20200211
+20220113
