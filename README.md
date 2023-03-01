@@ -1,8 +1,6 @@
 # rpi-mariadb
-Raspberry Pi Docker Container for MariaDB<BR>
-
-Multiarch build using balena's Raspberry Pi image and docker's official Debian image.<BR>
-Running with tag :latest should work on all Raspberry Pi models and standard 64-bit hardware.
+Docker Container for MariaDB<BR>
+Multi-arch build using balena's Raspberry Pi image and docker's official Debian image.
 
 Example for use with Nextcloud, run with:<BR>
 docker run -d --name someappdb \\\
@@ -14,6 +12,5 @@ docker run -d --name someappdb \\\
 -e MYSQL_PASSWORD=anotherreallyhardpassword \\\
 mattiasegly/rpi-mariadb:latest --transaction-isolation=READ-COMMITTED --log-bin=mysqld-bin --binlog-format=ROW
   
-I know nothing about code, so assume that everything here sets the world on fire. Use at your own peril.
-
-20220113
+I know nothing about code, so assume that everything here sets the world on fire.<BR>
+Use at your own peril.
