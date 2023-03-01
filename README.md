@@ -1,5 +1,5 @@
 # rpi-mariadb
-Docker Container for MariaDB<BR>
+Docker Container for MariaDB.<BR>
 Multi-arch build using balena's Raspberry Pi image and docker's official Debian image.
 
 Example for use with Nextcloud, run with:<BR>
