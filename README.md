@@ -11,6 +11,6 @@ docker run -d --name someappdb \\\
 -e MYSQL_USER=somedbuser \\\
 -e MYSQL_PASSWORD=anotherreallyhardpassword \\\
 mattiasegly/rpi-mariadb:latest --transaction-isolation=READ-COMMITTED --log-bin=mysqld-bin --binlog-format=ROW
-  
+
 I know nothing about code, so assume that everything here sets the world on fire.<BR>
 Use at your own peril.
