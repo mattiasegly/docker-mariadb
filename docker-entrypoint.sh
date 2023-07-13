@@ -162,6 +162,25 @@ docker_verify_minimum_env() {
 	if [ -n "$MARIADB_PASSWORD" ] && [ -n "$MARIADB_PASSWORD_HASH" ]; then
 		mysql_error "Cannot specify MARIADB_PASSWORD_HASH and MARIADB_PASSWORD option."
 	fi
+	if [ -n "$MARIADB_REPLICATION_USER" ]; then
+		if [ -z "$MARIADB_MASTER_HOST" ]; then
+			# its a master, we're creating a user
+			if [ -z "$MARIADB_REPLICATION_PASSWORD" ] && [ -z "$MARIADB_REPLICATION_PASSWORD_HASH" ]; then
+				mysql_error "MARIADB_REPLICATION_PASSWORD or MARIADB_REPLICATION_PASSWORD_HASH not found to create replication user for master"
+			fi
+		else
+			# its a replica
+			if [ -z "$MARIADB_REPLICATION_PASSWORD" ] ; then
+				mysql_error "MARIADB_REPLICATION_PASSWORD is mandatory to specify the replication on the replica image."
+			fi
+			if [ -n "$MARIADB_REPLICATION_PASSWORD_HASH" ] ; then
+				mysql_warn "MARIADB_REPLICATION_PASSWORD_HASH cannot be specified on a replica"
+			fi
+		fi
+	fi
+	if [ -n "$MARIADB_MASTER_HOST" ] && { [ -z "$MARIADB_REPLICATION_USER" ] || [ -z "$MARIADB_REPLICATION_PASSWORD" ] ; }; then
+		mysql_error "For a replica, MARIADB_REPLICATION_USER and MARIADB_REPLICATION is mandatory."
+	fi
 }
 
 # creates folders for the database
@@ -206,9 +225,10 @@ docker_init_database_dir() {
 # This should be called after mysql_check_config, but before any other functions
 docker_setup_env() {
 	# Get config
-	declare -g DATADIR SOCKET
+	declare -g DATADIR SOCKET PORT
 	DATADIR="$(mysql_get_config 'datadir' "$@")"
 	SOCKET="$(mysql_get_config 'socket' "$@")"
+	PORT="$(mysql_get_config 'port' "$@")"
 
 
 	# Initialize values that might be stored in a file
@@ -220,6 +240,13 @@ docker_setup_env() {
 	# No MYSQL_ compatibility needed for new variables
 	file_env 'MARIADB_PASSWORD_HASH'
 	file_env 'MARIADB_ROOT_PASSWORD_HASH'
+	# env variables related to replication
+	file_env 'MARIADB_REPLICATION_USER'
+	file_env 'MARIADB_REPLICATION_PASSWORD'
+	file_env 'MARIADB_REPLICATION_PASSWORD_HASH'
+	# env variables related to master
+	file_env 'MARIADB_MASTER_HOST'
+	file_env 'MARIADB_MASTER_PORT' 3306
 
 	# set MARIADB_ from MYSQL_ when it is unset and then make them the same value
 	: "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:=${MYSQL_ALLOW_EMPTY_PASSWORD:-}}"
@@ -264,6 +291,19 @@ docker_sql_escape_string_literal() {
 	local escaped=${1//\\/\\\\}
 	escaped="${escaped//$newline/\\n}"
 	echo "${escaped//\'/\\\'}"
+}
+
+# Creates replication user
+create_replica_user() {
+	if [ -n  "$MARIADB_REPLICATION_PASSWORD_HASH" ]; then
+		echo "CREATE USER '$MARIADB_REPLICATION_USER'@'%' IDENTIFIED BY PASSWORD '$MARIADB_REPLICATION_PASSWORD_HASH';"
+	else
+		# SQL escape the user password, \ followed by '
+		local userPasswordEscaped
+		userPasswordEscaped=$( docker_sql_escape_string_literal "${MARIADB_REPLICATION_PASSWORD}" )
+		echo "CREATE USER '$MARIADB_REPLICATION_USER'@'%' IDENTIFIED BY '$userPasswordEscaped';"
+	fi
+	echo "GRANT REPLICATION REPLICA ON *.* TO '$MARIADB_REPLICATION_USER'@'%';"
 }
 
 # Initializes database with timezone info and root password, plus optional extra db/user
@@ -313,16 +353,8 @@ docker_setup_db() {
 	local mysqlAtLocalhostGrants=
 	# Install mysql@localhost user
 	if [ -n "$MARIADB_MYSQL_LOCALHOST_USER" ]; then
-		local pw=
-		pw="$(pwgen --numerals --capitalize --symbols --remove-chars="'\\" -1 32)"
-		# MDEV-24111 before MariaDB-10.4 cannot create unix_socket user directly auth with simple_password_check
-		# It wasn't until 10.4 that the unix_socket auth was built in to the server.
 		read -r -d '' mysqlAtLocalhost <<-EOSQL || true
-		EXECUTE IMMEDIATE IF(VERSION() RLIKE '^10\.3\.',
-			"INSTALL PLUGIN /*M10401 IF NOT EXISTS */ unix_socket SONAME 'auth_socket'",
-			"SELECT 'already there'");
-		CREATE USER mysql@localhost IDENTIFIED BY '$pw';
-		ALTER USER mysql@localhost IDENTIFIED VIA unix_socket;
+		CREATE USER mysql@localhost IDENTIFIED VIA unix_socket;
 		EOSQL
 		if [ -n "$MARIADB_MYSQL_LOCALHOST_GRANTS" ]; then
 			if [ "$MARIADB_MYSQL_LOCALHOST_GRANTS" != USAGE ]; then
@@ -331,6 +363,29 @@ docker_setup_db() {
 			mysqlAtLocalhostGrants="GRANT ${MARIADB_MYSQL_LOCALHOST_GRANTS} ON *.* TO mysql@localhost;";
 		fi
 	fi
+
+	local healthCheckUser
+	local healthCheckGrant=USAGE
+	local healthCheckConnectPass
+	local healthCheckConnectPassEscaped
+	healthCheckConnectPass="$(pwgen --numerals --capitalize --symbols --remove-chars="=#'\\" -1 32)"
+	healthCheckConnectPassEscaped=$( docker_sql_escape_string_literal "${healthCheckConnectPass}" )
+	if [ -n "$MARIADB_HEALTHCHECK_GRANTS" ]; then
+		healthCheckGrant="$MARIADB_HEALTHCHECK_GRANTS"
+	fi
+	read -r -d '' healthCheckUser <<-EOSQL || true
+	CREATE USER healthcheck@'127.0.0.1' IDENTIFIED BY '$healthCheckConnectPassEscaped';
+	CREATE USER healthcheck@'::1' IDENTIFIED BY '$healthCheckConnectPassEscaped';
+	CREATE USER healthcheck@localhost IDENTIFIED BY '$healthCheckConnectPassEscaped';
+	GRANT $healthCheckGrant ON *.* TO healthcheck@'127.0.0.1';
+	GRANT $healthCheckGrant ON *.* TO healthcheck@'::1';
+	GRANT $healthCheckGrant ON *.* TO healthcheck@localhost;
+	EOSQL
+	local maskPreserve
+	maskPreserve=$(umask -p)
+	umask 0077
+	echo -e "[mariadb-client]\\nport=$PORT\\nsocket=$SOCKET\\nuser=healthcheck\\npassword=$healthCheckConnectPass\\nprotocol=tcp\\n" > "$DATADIR"/.my-healthcheck.cnf
+	$maskPreserve
 
 	local rootLocalhostPass=
 	if [ -z "$MARIADB_ROOT_PASSWORD_HASH" ]; then
@@ -364,6 +419,26 @@ docker_setup_db() {
 		fi
 	fi
 
+	# To create replica user
+	local createReplicaUser=
+	local changeMasterTo=
+	local startReplica=
+	if  [ -n "$MARIADB_REPLICATION_USER" ] ; then
+		if [ -z "$MARIADB_MASTER_HOST" ]; then
+			# on master
+			mysql_note "Creating user ${MARIADB_REPLICATION_USER}"
+			createReplicaUser=$(create_replica_user)
+		else
+			# on replica
+			local rplPasswordEscaped
+			rplPasswordEscaped=$( docker_sql_escape_string_literal "${MARIADB_REPLICATION_PASSWORD}" )
+			# SC cannot follow how MARIADB_MASTER_PORT is assigned a default value.
+			# shellcheck disable=SC2153
+			changeMasterTo="CHANGE MASTER TO MASTER_HOST='$MARIADB_MASTER_HOST', MASTER_USER='$MARIADB_REPLICATION_USER', MASTER_PASSWORD='$rplPasswordEscaped', MASTER_PORT=$MARIADB_MASTER_PORT, MASTER_CONNECT_RETRY=10;"
+			startReplica="START REPLICA;"
+		fi
+	fi
+
 	mysql_note "Securing system users (equivalent to running mysql_secure_installation)"
 	# tell docker_process_sql to not use MARIADB_ROOT_PASSWORD since it is just now being set
 	# --binary-mode to save us from the semi-mad users go out of their way to confuse the encoding.
@@ -381,14 +456,17 @@ docker_setup_db() {
 		${rootCreate}
 		${mysqlAtLocalhost}
 		${mysqlAtLocalhostGrants}
-		-- pre-10.3 only
-		DROP DATABASE IF EXISTS test ;
+		${healthCheckUser}
 		-- end of securing system users, rest of init now...
 		SET @@SESSION.SQL_LOG_BIN=@orig_sql_log_bin;
 		-- create users/databases
 		${createDatabase}
 		${createUser}
+		${createReplicaUser}
 		${userGrants}
+
+		${changeMasterTo}
+		${startReplica}
 	EOSQL
 }
 
